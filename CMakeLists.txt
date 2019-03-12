@@ -57,8 +57,9 @@ add_library ( ${PROJECT_NAME} SHARED
         
 target_link_libraries ( ${PROJECT_NAME} PRIVATE
         wilton_core
-        wilton_logging
         wilton_crypto
+        wilton_logging
+        wilton_zip
         ${${PROJECT_NAME}_DEPS_PC_LIBRARIES} )
 
 target_include_directories ( ${PROJECT_NAME} BEFORE PRIVATE 
@@ -74,6 +75,12 @@ if ( STATICLIB_TOOLCHAIN MATCHES "android_.+" )
     set_property ( TARGET ${PROJECT_NAME} APPEND_STRING PROPERTY LINK_FLAGS "-Wl,-soname,lib${PROJECT_NAME}.so" )
 elseif ( STATICLIB_TOOLCHAIN MATCHES "windows_.+" )
     set_property ( TARGET ${PROJECT_NAME} APPEND_STRING PROPERTY LINK_FLAGS "/manifest:no" )
+elseif ( STATICLIB_TOOLCHAIN MATCHES "macosx_.+" )
+    find_library ( ${PROJECT_NAME}_CORELIB CoreFoundation )
+    find_library ( ${PROJECT_NAME}_SECLIB Security )
+    target_link_libraries ( ${PROJECT_NAME} PRIVATE
+            ${${PROJECT_NAME}_CORELIB}
+            ${${PROJECT_NAME}_SECLIB} )
 endif ( )
 
 # debuginfo
