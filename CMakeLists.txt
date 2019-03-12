@@ -17,16 +17,12 @@ cmake_minimum_required ( VERSION 2.8.12 )
 # project
 project ( wilton_git CXX )
 
-# dep options
-
 # dependencies
 set ( ${PROJECT_NAME}_ADDITIONAL_DEPS )
 if ( STATICLIB_TOOLCHAIN MATCHES "(android|windows|macosx)_.+" )
     staticlib_add_subdirectory ( ${STATICLIB_DEPS}/external_libssh2 )
     staticlib_add_subdirectory ( ${STATICLIB_DEPS}/external_libgit2 )
-elseif ( WILTON_BUILD_FLAVOUR MATCHES "fedora" )
-     # use system libgit2
-else ( )
+elseif ( WILTON_BUILD_FLAVOUR MATCHES "wheezy" )
     staticlib_add_subdirectory ( ${STATICLIB_DEPS}/external_libgit2 )
 endif ( )
 
