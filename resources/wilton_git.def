@@ -14,6 +14,7 @@
 
 EXPORTS
     wilton_git_initialize
+    wilton_git_shutdown
     wilton_git_clone
     wilton_git_pull
 

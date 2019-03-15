@@ -22,6 +22,7 @@
  */
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "staticlib/config.hpp"
@@ -37,6 +38,19 @@
 
 namespace wilton {
 namespace git {
+
+namespace { //anonymous
+
+// initialized from wilton_module_init
+std::shared_ptr<bool> shutdown_trigger() {
+    static auto trigger = std::shared_ptr<bool>(new bool(true), [](bool* flag) {
+        delete flag;
+        wilton_git_shutdown();
+    });
+    return trigger;
+}
+
+} // namespace
 
 support::buffer clone(sl::io::span<const char> data) {
     // json parse
@@ -59,6 +73,8 @@ support::buffer clone(sl::io::span<const char> data) {
             "Required parameter 'repo' not specified"));
     const std::string& url = rurl.get();
     const std::string& repo = rrepo.get();
+    // prevent shutdown during the call
+    auto trigger = shutdown_trigger();
     // call wilton
     char* err = wilton_git_clone(url.c_str(), static_cast<int>(url.length()),
             repo.c_str(), static_cast<int>(repo.length()));
@@ -87,6 +103,8 @@ support::buffer pull(sl::io::span<const char> data) {
             "Required parameter 'branch' not specified"));
     const std::string& repo = rrepo.get();
     const std::string& branch = rbranch.get();
+    // prevent shutdown during the call
+    auto trigger = shutdown_trigger();
     // call wilton
     char* err = wilton_git_pull(repo.c_str(), static_cast<int>(repo.length()),
             branch.c_str(), static_cast<int>(branch.length()));
@@ -102,6 +120,7 @@ extern "C" char* wilton_module_init() {
         auto err = wilton_git_initialize();
         if (nullptr != err) wilton::support::throw_wilton_error(err, TRACEMSG(err));
 
+        wilton::git::shutdown_trigger();
         wilton::support::register_wiltoncall("git_clone", wilton::git::clone);
         wilton::support::register_wiltoncall("git_pull", wilton::git::pull);
 

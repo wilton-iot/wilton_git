@@ -30,6 +30,8 @@ extern "C" {
 
 char* wilton_git_initialize();
 
+char* wilton_git_shutdown();
+
 char* wilton_git_clone(
         const char* remote_url,
         int remote_url_len,

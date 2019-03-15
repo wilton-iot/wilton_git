@@ -40,6 +40,11 @@ char* wilton_git_initialize() {
     return nullptr;
 }
 
+char* wilton_git_shutdown() {
+    git_libgit2_shutdown();
+    return nullptr;
+}
+
 char* wilton_git_clone(
         const char* remote_url,
         int remote_url_len,
