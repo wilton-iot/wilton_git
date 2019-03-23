@@ -36,7 +36,9 @@ char* wilton_git_clone(
         const char* remote_url,
         int remote_url_len,
         const char* dest_repo_path,
-        int dest_repo_path_len);
+        int dest_repo_path_len,
+        const char* options_json,
+        int options_json_len);
 
 char* wilton_git_pull(
         const char* repo_path,

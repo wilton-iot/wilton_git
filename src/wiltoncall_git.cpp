@@ -57,12 +57,19 @@ support::buffer clone(sl::io::span<const char> data) {
     auto json = sl::json::load(data);
     auto rurl = std::ref(sl::utils::empty_string());
     auto rrepo = std::ref(sl::utils::empty_string());
+    auto options = std::string("{}");
     for (const sl::json::field& fi : json.as_object()) {
         auto& name = fi.name();
         if ("url" == name) {
             rurl = fi.as_string_nonempty_or_throw(name);
         } else if ("repo" == name) {
             rrepo = fi.as_string_nonempty_or_throw(name);
+        } else if ("options" == name) {
+            if (sl::json::type::object != fi.json_type()) {
+                throw support::exception(TRACEMSG("Invalid non-object options specified," +
+                        " type: [" + sl::json::stringify_json_type(fi.json_type()) + "]"));
+            }
+            options = fi.val().dumps();
         } else {
             throw support::exception(TRACEMSG("Unknown data field: [" + name + "]"));
         }
@@ -77,7 +84,8 @@ support::buffer clone(sl::io::span<const char> data) {
     auto trigger = shutdown_trigger();
     // call wilton
     char* err = wilton_git_clone(url.c_str(), static_cast<int>(url.length()),
-            repo.c_str(), static_cast<int>(repo.length()));
+            repo.c_str(), static_cast<int>(repo.length()),
+            options.c_str(), static_cast<int>(options.length()));
     if (nullptr != err) support::throw_wilton_error(err, TRACEMSG(err));
     return support::make_null_buffer();
 }
