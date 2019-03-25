@@ -67,7 +67,8 @@ struct cb_payload {
 std::pair<std::string, int> last_git_error() {
     auto msg = std::string();
     int code = -1;
-    auto gerr = git_error_last();
+    //auto gerr = git_error_last();
+    auto gerr = giterr_last();
     if (nullptr != gerr) {
         if (nullptr != gerr->message) {
             msg.append(gerr->message);
@@ -81,7 +82,7 @@ int cred_cb(git_cred** out, const char* url, const char* user, unsigned int, voi
     auto pl = reinterpret_cast<cb_payload*>(payload);
     auto url_str = std::string(nullptr != url ? url : "");
     auto user_str = std::string(nullptr != user ? user : "");
-    if (sl::utils::starts_with(url_str, "git+ssh:")) {
+    if (sl::utils::starts_with(url_str, "git+ssh://")) {
         return git_cred_ssh_key_new(out, user_str.c_str(), pl->ssh_pubkey.c_str(),
                 pl->ssh_privkey.c_str(), nullptr);
     } else {
@@ -131,6 +132,16 @@ char* wilton_git_clone(
     try {
         auto remote_url_str = std::string(remote_url, static_cast<uint16_t>(remote_url_len));
         auto dest_repo_path_str = std::string(dest_repo_path, static_cast<uint16_t>(dest_repo_path_len));
+
+        // check protocol
+        if (!(sl::utils::starts_with(remote_url_str, "file://") ||
+                sl::utils::starts_with(remote_url_str, "git+ssh://") ||
+                sl::utils::starts_with(remote_url_str, "http://") ||
+                sl::utils::starts_with(remote_url_str, "https://"))) {
+            throw wilton::support::exception(TRACEMSG("Unsupported protocol specified," +
+                    " URL: [" + remote_url_str + "],"
+                    " supported protocols: [file://, git+ssh://, http://, https://]"));
+        }
 
         // parse options
         auto span = sl::io::make_span(options_json, options_json_len);
