@@ -57,7 +57,7 @@ support::buffer clone(sl::io::span<const char> data) {
     auto json = sl::json::load(data);
     auto rurl = std::ref(sl::utils::empty_string());
     auto rrepo = std::ref(sl::utils::empty_string());
-    auto options = std::string("{}");
+    auto options = std::string();
     for (const sl::json::field& fi : json.as_object()) {
         auto& name = fi.name();
         if ("url" == name) {
@@ -78,6 +78,8 @@ support::buffer clone(sl::io::span<const char> data) {
             "Required parameter 'url' not specified"));
     if (rrepo.get().empty()) throw support::exception(TRACEMSG(
             "Required parameter 'repo' not specified"));
+    if (options.empty()) throw support::exception(TRACEMSG(
+            "Required parameter 'options' not specified"));
     const std::string& url = rurl.get();
     const std::string& repo = rrepo.get();
     // prevent shutdown during the call

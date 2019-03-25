@@ -43,17 +43,20 @@ namespace { // anonymous
 
 const std::string logger = std::string("wilton.git");
 
+const std::string file_proto = std::string("file://");
+const std::string ssh_proto = std::string("git+ssh://");
+const std::string http_proto = std::string("http://");
+const std::string https_proto = std::string("https://");
+
 struct cb_payload {
-    std::string ssh_user;
     std::string ssh_pubkey;
     std::string ssh_privkey;
     bool https_cert_check = true;
     std::string https_username;
     std::string https_password;
 
-    cb_payload(const std::string& user, const std::string& pubkey, const std::string& privkey,
+    cb_payload(const std::string& pubkey, const std::string& privkey,
             bool check, const std::string& huser, const std::string& hpass) :
-    ssh_user(user.data(), user.length()),
     ssh_pubkey(pubkey.data(), pubkey.length()),
     ssh_privkey(privkey.data(), privkey.length()),
     https_cert_check(check),
@@ -82,7 +85,7 @@ int cred_cb(git_cred** out, const char* url, const char* user, unsigned int, voi
     auto pl = reinterpret_cast<cb_payload*>(payload);
     auto url_str = std::string(nullptr != url ? url : "");
     auto user_str = std::string(nullptr != user ? user : "");
-    if (sl::utils::starts_with(url_str, "git+ssh://")) {
+    if (sl::utils::starts_with(url_str, ssh_proto)) {
         return git_cred_ssh_key_new(out, user_str.c_str(), pl->ssh_pubkey.c_str(),
                 pl->ssh_privkey.c_str(), nullptr);
     } else {
@@ -134,19 +137,18 @@ char* wilton_git_clone(
         auto dest_repo_path_str = std::string(dest_repo_path, static_cast<uint16_t>(dest_repo_path_len));
 
         // check protocol
-        if (!(sl::utils::starts_with(remote_url_str, "file://") ||
-                sl::utils::starts_with(remote_url_str, "git+ssh://") ||
-                sl::utils::starts_with(remote_url_str, "http://") ||
-                sl::utils::starts_with(remote_url_str, "https://"))) {
+        if (!(sl::utils::starts_with(remote_url_str, file_proto) ||
+                sl::utils::starts_with(remote_url_str, ssh_proto) ||
+                sl::utils::starts_with(remote_url_str, http_proto) ||
+                sl::utils::starts_with(remote_url_str, https_proto))) {
             throw wilton::support::exception(TRACEMSG("Unsupported protocol specified," +
-                    " URL: [" + remote_url_str + "],"
-                    " supported protocols: [file://, git+ssh://, http://, https://]"));
+                    " URL: [" + remote_url_str + "], supported protocols: [" +
+                    file_proto + ", " + ssh_proto + ", " + http_proto + ", " + https_proto + "]"));
         }
 
         // parse options
         auto span = sl::io::make_span(options_json, options_json_len);
         auto json = sl::json::load(span);
-        auto rssh_user = std::ref(sl::utils::empty_string());
         auto rssh_pubkey = std::ref(sl::utils::empty_string());
         auto rssh_privkey = std::ref(sl::utils::empty_string());
         bool https_cert_check = true;
@@ -175,7 +177,7 @@ char* wilton_git_clone(
                     "Required parameter 'options.sshPrivateKeyPath' not specified"));
         }
         auto payload = sl::support::make_unique<cb_payload>(
-                rssh_user.get(), rssh_pubkey.get(), rssh_privkey.get(),
+                rssh_pubkey.get(), rssh_privkey.get(),
                 https_cert_check, rhttps_user.get(), rhttps_password.get());
 
         // prepare options
@@ -184,6 +186,10 @@ char* wilton_git_clone(
         opts.fetch_opts.callbacks.credentials = cred_cb;
         opts.fetch_opts.callbacks.certificate_check = cert_cb;
         opts.fetch_opts.callbacks.payload = reinterpret_cast<void*>(payload.get());
+        // strip file proto (required for windows)
+        if (sl::utils::starts_with(remote_url_str, file_proto)) {
+            remote_url_str = remote_url_str.substr(file_proto.length());
+        }
 
         // call libgit2
         git_repository* repo = nullptr;
