@@ -49,19 +49,19 @@ const std::string http_proto = std::string("http://");
 const std::string https_proto = std::string("https://");
 
 struct cb_payload {
+    std::string username;
+    std::string password;
     std::string ssh_pubkey;
     std::string ssh_privkey;
     bool https_cert_check = true;
-    std::string https_username;
-    std::string https_password;
 
-    cb_payload(const std::string& pubkey, const std::string& privkey,
-            bool check, const std::string& huser, const std::string& hpass) :
+    cb_payload(const std::string& user, const std::string& pass,
+            const std::string& pubkey, const std::string& privkey, bool hcheck) :
+    username(user.data(), user.length()),
+    password(pass.data(), pass.length()),
     ssh_pubkey(pubkey.data(), pubkey.length()),
     ssh_privkey(privkey.data(), privkey.length()),
-    https_cert_check(check),
-    https_username(huser.data(), huser.length()),
-    https_password(hpass.data(), hpass.length()) { }
+    https_cert_check(hcheck) {}
 
     cb_payload(const cb_payload&) = delete;
     cb_payload& operator=(const cb_payload&) = delete;
@@ -81,17 +81,32 @@ std::pair<std::string, int> last_git_error() {
     return {msg, code};
 }
 
-int cred_cb(git_cred** out, const char* url, const char* user, unsigned int, void* payload) {
+int cred_cb(git_cred** out, const char* url, const char* user,
+        unsigned int allowed_types, void* payload) {
     auto pl = reinterpret_cast<cb_payload*>(payload);
     auto url_str = std::string(nullptr != url ? url : "");
     auto user_str = std::string(nullptr != user ? user : "");
-    if (sl::utils::starts_with(url_str, ssh_proto)) {
-        return git_cred_ssh_key_new(out, user_str.c_str(), pl->ssh_pubkey.c_str(),
-                pl->ssh_privkey.c_str(), nullptr);
-    } else {
-        auto& user_to_pass = !pl->https_username.empty() ? pl->https_username : user_str;
-        return git_cred_userpass_plaintext_new(out,
-                user_to_pass.c_str(), pl->https_password.c_str());
+    if (sl::utils::starts_with(url_str, ssh_proto)) { // ssh
+        if (!pl->ssh_pubkey.empty() && !pl->ssh_privkey.empty()) { // key auth
+            return git_cred_ssh_key_new(out, user_str.c_str(), pl->ssh_pubkey.c_str(),
+                    pl->ssh_privkey.c_str(), nullptr);
+        } else { // user password auth
+            if (GIT_CREDTYPE_USERNAME == allowed_types) { // asked for username
+                if (!pl->username.empty()) {
+                    return git_cred_username_new(out, pl->username.c_str());
+                } else {
+                    // 0 for success, < 0 to indicate an error,
+                    // > 0 to indicate no credential was acquired
+                    return 1;
+                }
+            } else { // asked for password
+                return git_cred_userpass_plaintext_new(out,
+                        user_str.c_str(), pl->password.c_str());
+            }
+        }
+    } else { // https
+        auto& user_to_pass = !user_str.empty() ? user_str : pl->username;
+        return git_cred_userpass_plaintext_new(out, user_to_pass.c_str(), pl->password.c_str());
     }
 }
 
@@ -102,6 +117,53 @@ int cert_cb(git_cert*, int valid, const char*, void* payload) {
     } else {
         return 0;
     }
+}
+
+void check_supported_protocol(const std::string& remote_url_str) {
+    if (!(sl::utils::starts_with(remote_url_str, file_proto) ||
+            sl::utils::starts_with(remote_url_str, ssh_proto) ||
+            sl::utils::starts_with(remote_url_str, http_proto) ||
+            sl::utils::starts_with(remote_url_str, https_proto))) {
+        throw wilton::support::exception(TRACEMSG("Unsupported protocol specified," +
+                " URL: [" + remote_url_str + "], supported protocols: [" +
+                file_proto + ", " + ssh_proto + ", " + http_proto + ", " + https_proto + "]"));
+    }
+}
+
+std::unique_ptr<cb_payload> create_payload(const std::string& remote_url_str, sl::io::span<const char> span) {
+    auto json = sl::json::load(span);
+    auto ruser = std::ref(sl::utils::empty_string());
+    auto rpassword = std::ref(sl::utils::empty_string());
+    auto rssh_pubkey = std::ref(sl::utils::empty_string());
+    auto rssh_privkey = std::ref(sl::utils::empty_string());
+    bool https_cert_check = true;
+    for (const sl::json::field& fi : json.as_object()) {
+        auto& name = fi.name();
+        if ("username" == name) {
+            ruser = fi.as_string_nonempty_or_throw(name);
+        } else if ("password" == name) {
+            rpassword = fi.as_string_nonempty_or_throw(name);
+        } else if ("sshPublicKeyPath" == name) {
+            rssh_pubkey = fi.as_string_nonempty_or_throw(name);
+        } else if ("sshPrivateKeyPath" == name) {
+            rssh_privkey = fi.as_string_nonempty_or_throw(name);
+        } else if ("httpsCheckCertificate" == name) {
+            https_cert_check = fi.as_bool_or_throw(name);
+        } else {
+            throw wilton::support::exception(TRACEMSG("Unknown data field: [" + name + "]"));
+        }
+    }
+    if (sl::utils::starts_with(remote_url_str, "git+ssh:")) {
+        if ((rssh_pubkey.get().empty() || rssh_privkey.get().empty()) && rpassword.get().empty()) {
+            throw wilton::support::exception(TRACEMSG(
+                "Either both 'sshPublicKeyPath' and 'sshPrivateKeyPath' or 'password'"
+                " options must be specified for authentication over 'git+ssh' protocol"));
+        }
+    }
+    return sl::support::make_unique<cb_payload>(
+            ruser.get(), rpassword.get(),
+            rssh_pubkey.get(), rssh_privkey.get(),
+            https_cert_check);
 }
 
 } // namespace
@@ -137,48 +199,11 @@ char* wilton_git_clone(
         auto dest_repo_path_str = std::string(dest_repo_path, static_cast<uint16_t>(dest_repo_path_len));
 
         // check protocol
-        if (!(sl::utils::starts_with(remote_url_str, file_proto) ||
-                sl::utils::starts_with(remote_url_str, ssh_proto) ||
-                sl::utils::starts_with(remote_url_str, http_proto) ||
-                sl::utils::starts_with(remote_url_str, https_proto))) {
-            throw wilton::support::exception(TRACEMSG("Unsupported protocol specified," +
-                    " URL: [" + remote_url_str + "], supported protocols: [" +
-                    file_proto + ", " + ssh_proto + ", " + http_proto + ", " + https_proto + "]"));
-        }
+        check_supported_protocol(remote_url_str);
 
         // parse options
         auto span = sl::io::make_span(options_json, options_json_len);
-        auto json = sl::json::load(span);
-        auto rssh_pubkey = std::ref(sl::utils::empty_string());
-        auto rssh_privkey = std::ref(sl::utils::empty_string());
-        bool https_cert_check = true;
-        auto rhttps_user = std::ref(sl::utils::empty_string());
-        auto rhttps_password = std::ref(sl::utils::empty_string());
-        for (const sl::json::field& fi : json.as_object()) {
-            auto& name = fi.name();
-            if ("sshPublicKeyPath" == name) {
-                rssh_pubkey = fi.as_string_nonempty_or_throw(name);
-            } else if ("sshPrivateKeyPath" == name) {
-                rssh_privkey = fi.as_string_nonempty_or_throw(name);
-            } else if ("httpsCheckCertificate" == name) {
-                https_cert_check = fi.as_bool_or_throw(name);
-            } else if ("httpsUser" == name) {
-                rhttps_user = fi.as_string_nonempty_or_throw(name);
-            } else if ("httpsPassword" == name) {
-                rhttps_password = fi.as_string_nonempty_or_throw(name);
-            } else {
-                throw wilton::support::exception(TRACEMSG("Unknown data field: [" + name + "]"));
-            }
-        }
-        if (sl::utils::starts_with(remote_url_str, "git+ssh:")) {
-            if (rssh_pubkey.get().empty()) throw wilton::support::exception(TRACEMSG(
-                    "Required parameter 'options.sshPublicKeyPath' not specified"));
-            if (rssh_privkey.get().empty()) throw wilton::support::exception(TRACEMSG(
-                    "Required parameter 'options.sshPrivateKeyPath' not specified"));
-        }
-        auto payload = sl::support::make_unique<cb_payload>(
-                rssh_pubkey.get(), rssh_privkey.get(),
-                https_cert_check, rhttps_user.get(), rhttps_password.get());
+        auto payload = create_payload(remote_url_str, span);
 
         // prepare options
         git_clone_options opts;
@@ -219,10 +244,142 @@ char* wilton_git_pull(
         const char* repo_path,
         int repo_path_len,
         const char* branch_name,
-        int branch_name_len) /* noexcept */ {
-    (void) repo_path;
-    (void) repo_path_len;
-    (void) branch_name;
-    (void) branch_name_len;
-    return nullptr;
+        int branch_name_len,
+        const char* options_json,
+        int options_json_len) /* noexcept */ {
+    if (nullptr == repo_path) return wilton::support::alloc_copy(TRACEMSG("Null 'repo_path' parameter specified"));
+    if (!sl::support::is_uint16_positive(repo_path_len)) return wilton::support::alloc_copy(TRACEMSG(
+            "Invalid 'repo_path_len' parameter specified: [" + sl::support::to_string(repo_path_len) + "]"));
+    if (nullptr == branch_name) return wilton::support::alloc_copy(TRACEMSG("Null 'branch_name' parameter specified"));
+    if (!sl::support::is_uint16_positive(branch_name_len)) return wilton::support::alloc_copy(TRACEMSG(
+            "Invalid 'branch_name_len' parameter specified: [" + sl::support::to_string(branch_name_len) + "]"));
+    if (nullptr == options_json) return wilton::support::alloc_copy(TRACEMSG("Null 'options_json' parameter specified"));
+    if (!sl::support::is_uint32_positive(options_json_len)) return wilton::support::alloc_copy(TRACEMSG(
+            "Invalid 'options_json_len' parameter specified: [" + sl::support::to_string(options_json_len) + "]"));
+    try {
+        auto repo_path_str = std::string(repo_path, static_cast<uint16_t>(repo_path_len));
+        auto branch_name_str = std::string(branch_name, static_cast<uint16_t>(branch_name_len));
+
+        // find out remote url
+        git_repository* repo = nullptr;
+        auto open_err = git_repository_open(std::addressof(repo), repo_path_str.c_str());
+        if (0 != open_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Error opening git repo," + 
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+        auto deferred_repo = sl::support::defer([repo]() STATICLIB_NOEXCEPT {
+            git_repository_free(repo);
+        });
+
+        git_remote* remote = nullptr;
+        auto lookup_err = git_remote_lookup(std::addressof(remote), repo, "origin");
+        if (0 != lookup_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Remote 'origin' lookup error," + 
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+        auto deferred_remote = sl::support::defer([remote]() STATICLIB_NOEXCEPT {
+            git_remote_free(remote);
+        });
+
+        auto url_ptr = git_remote_url(remote);
+        if (nullptr == url_ptr) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Remote 'origin' URL error," + 
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+        auto url_read = std::string(url_ptr);
+        auto url = std::string();
+        if (!(sl::utils::starts_with(url_read, ssh_proto) ||
+                sl::utils::starts_with(url_read, http_proto) ||
+                sl::utils::starts_with(url_read, https_proto))) {
+            url = file_proto + url_read;
+        } else {
+            url = url_read;
+        }
+
+        // check protocol
+        check_supported_protocol(url);
+
+        // parse options
+        auto span = sl::io::make_span(options_json, options_json_len);
+        auto payload = create_payload(url, span);
+
+        // prepare options
+        git_fetch_options opts;
+        git_fetch_init_options(std::addressof(opts), GIT_FETCH_OPTIONS_VERSION);
+        opts.callbacks.credentials = cred_cb;
+        opts.callbacks.certificate_check = cert_cb;
+        opts.callbacks.payload = reinterpret_cast<void*>(payload.get());
+ 
+        // fetch
+        auto fetch_err = git_remote_fetch(remote, nullptr, std::addressof(opts), nullptr);
+        if (0 != fetch_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Remote repo fetch error," + 
+                    " url: [" + url + "]," +
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+
+        // checkout
+        
+        git_object* treeish = nullptr;
+        auto rbranch = "origin/" + branch_name_str;
+        auto tree_err = git_revparse_single(std::addressof(treeish), repo, rbranch.c_str());
+        if (0 != tree_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Remote branch not found," + 
+                    " branch: [" + rbranch + "]," +
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+        auto deferred_treeish = sl::support::defer([treeish]() STATICLIB_NOEXCEPT {
+            git_object_free(treeish);
+        });
+ 
+        git_checkout_options copts;
+        git_checkout_init_options(std::addressof(copts), GIT_CHECKOUT_OPTIONS_VERSION);
+        copts.checkout_strategy = GIT_CHECKOUT_SAFE;
+        auto checkout_err = git_checkout_tree(repo, treeish, std::addressof(copts));
+        if (0 != checkout_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Branch checkout error," + 
+                    " branch: [" + rbranch + "]," +
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+
+        auto ref = "refs/remotes/origin/" + branch_name_str;
+        auto head_err = git_repository_set_head(repo, ref.c_str());
+        if(0 != head_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Branch set HEAD error," + 
+                    " branch: [" + ref + "]," +
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+
+        return nullptr;
+    } catch (const std::exception& e) {
+        return wilton::support::alloc_copy(TRACEMSG(e.what() + "\nException raised"));
+    }
 }

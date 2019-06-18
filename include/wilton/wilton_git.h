@@ -44,7 +44,9 @@ char* wilton_git_pull(
         const char* repo_path,
         int repo_path_len,
         const char* branch_name,
-        int branch_name_len);
+        int branch_name_len,
+        const char* options_json,
+        int options_json_len);
 
 #ifdef __cplusplus
 }
