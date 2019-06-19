@@ -54,14 +54,17 @@ struct cb_payload {
     std::string ssh_pubkey;
     std::string ssh_privkey;
     bool https_cert_check = true;
+    std::string branch_name;
 
     cb_payload(const std::string& user, const std::string& pass,
-            const std::string& pubkey, const std::string& privkey, bool hcheck) :
+            const std::string& pubkey, const std::string& privkey,
+            bool hcheck, const std::string& branch) :
     username(user.data(), user.length()),
     password(pass.data(), pass.length()),
     ssh_pubkey(pubkey.data(), pubkey.length()),
     ssh_privkey(privkey.data(), privkey.length()),
-    https_cert_check(hcheck) {}
+    https_cert_check(hcheck),
+    branch_name(branch.data(), branch.length()) {}
 
     cb_payload(const cb_payload&) = delete;
     cb_payload& operator=(const cb_payload&) = delete;
@@ -137,6 +140,7 @@ std::unique_ptr<cb_payload> create_payload(const std::string& remote_url_str, sl
     auto rssh_pubkey = std::ref(sl::utils::empty_string());
     auto rssh_privkey = std::ref(sl::utils::empty_string());
     bool https_cert_check = true;
+    auto rbranch = std::ref(sl::utils::empty_string());
     for (const sl::json::field& fi : json.as_object()) {
         auto& name = fi.name();
         if ("username" == name) {
@@ -149,6 +153,8 @@ std::unique_ptr<cb_payload> create_payload(const std::string& remote_url_str, sl
             rssh_privkey = fi.as_string_nonempty_or_throw(name);
         } else if ("httpsCheckCertificate" == name) {
             https_cert_check = fi.as_bool_or_throw(name);
+        } else if ("branch" == name) {
+            rbranch = fi.as_string_nonempty_or_throw(name);
         } else {
             throw wilton::support::exception(TRACEMSG("Unknown data field: [" + name + "]"));
         }
@@ -163,7 +169,52 @@ std::unique_ptr<cb_payload> create_payload(const std::string& remote_url_str, sl
     return sl::support::make_unique<cb_payload>(
             ruser.get(), rpassword.get(),
             rssh_pubkey.get(), rssh_privkey.get(),
-            https_cert_check);
+            https_cert_check, rbranch.get());
+}
+
+void checkout_remote_branch(const std::string& repo_path, git_repository* repo, const std::string& branch_name) {
+    auto branch = !branch_name.empty() ? branch_name : "master";
+    git_object* treeish = nullptr;
+    auto rbranch = "origin/" + branch;
+    auto tree_err = git_revparse_single(std::addressof(treeish), repo, rbranch.c_str());
+    if (0 != tree_err) {
+        auto pa = last_git_error();
+        throw wilton::support::exception(TRACEMSG(
+                "Remote branch not found," + 
+                " branch: [" + rbranch + "]," +
+                " path: [" + repo_path + "]," +
+                " code: [" + sl::support::to_string(pa.second) + "]," +
+                " message: [" + pa.first + "]"));
+    }
+    auto deferred_treeish = sl::support::defer([treeish]() STATICLIB_NOEXCEPT {
+        git_object_free(treeish);
+    });
+
+    git_checkout_options copts;
+    git_checkout_init_options(std::addressof(copts), GIT_CHECKOUT_OPTIONS_VERSION);
+    copts.checkout_strategy = GIT_CHECKOUT_SAFE;
+    auto checkout_err = git_checkout_tree(repo, treeish, std::addressof(copts));
+    if (0 != checkout_err) {
+        auto pa = last_git_error();
+        throw wilton::support::exception(TRACEMSG(
+                "Branch checkout error," + 
+                " branch: [" + rbranch + "]," +
+                " path: [" + repo_path + "]," +
+                " code: [" + sl::support::to_string(pa.second) + "]," +
+                " message: [" + pa.first + "]"));
+    }
+
+    auto ref = "refs/remotes/origin/" + branch;
+    auto head_err = git_repository_set_head(repo, ref.c_str());
+    if(0 != head_err) {
+        auto pa = last_git_error();
+        throw wilton::support::exception(TRACEMSG(
+                "Branch set HEAD error," + 
+                " branch: [" + ref + "]," +
+                " path: [" + repo_path + "]," +
+                " code: [" + sl::support::to_string(pa.second) + "]," +
+                " message: [" + pa.first + "]"));
+    }
 }
 
 } // namespace
@@ -222,11 +273,7 @@ char* wilton_git_clone(
                 " URL: [" + remote_url_str + "] destination: [" + dest_repo_path_str + "] ...");
         auto err = git_clone(std::addressof(repo), remote_url_str.c_str(),
                 dest_repo_path_str.c_str(), std::addressof(opts));
-        if (0 == err) {
-            wilton::support::log_debug(logger, "Git repo cloned successfully");
-            git_repository_free(repo);
-            return nullptr;
-        } else {
+        if (0 != err) {
             auto pa = last_git_error();
             throw wilton::support::exception(TRACEMSG(
                     "Error cloning git repo," + 
@@ -235,6 +282,15 @@ char* wilton_git_clone(
                     " code: [" + sl::support::to_string(pa.second) + "]," +
                     " message: [" + pa.first + "]"));
         }
+        auto deferred_repo = sl::support::defer([repo]() STATICLIB_NOEXCEPT {
+            git_repository_free(repo);
+        });
+
+        checkout_remote_branch(dest_repo_path_str, repo, payload->branch_name);
+
+        wilton::support::log_debug(logger, "Git repo cloned successfully");
+
+        return nullptr;
     } catch (const std::exception& e) {
         return wilton::support::alloc_copy(TRACEMSG(e.what() + "\nException raised"));
     }
@@ -243,22 +299,18 @@ char* wilton_git_clone(
 char* wilton_git_pull(
         const char* repo_path,
         int repo_path_len,
-        const char* branch_name,
-        int branch_name_len,
         const char* options_json,
         int options_json_len) /* noexcept */ {
     if (nullptr == repo_path) return wilton::support::alloc_copy(TRACEMSG("Null 'repo_path' parameter specified"));
     if (!sl::support::is_uint16_positive(repo_path_len)) return wilton::support::alloc_copy(TRACEMSG(
             "Invalid 'repo_path_len' parameter specified: [" + sl::support::to_string(repo_path_len) + "]"));
-    if (nullptr == branch_name) return wilton::support::alloc_copy(TRACEMSG("Null 'branch_name' parameter specified"));
-    if (!sl::support::is_uint16_positive(branch_name_len)) return wilton::support::alloc_copy(TRACEMSG(
-            "Invalid 'branch_name_len' parameter specified: [" + sl::support::to_string(branch_name_len) + "]"));
     if (nullptr == options_json) return wilton::support::alloc_copy(TRACEMSG("Null 'options_json' parameter specified"));
     if (!sl::support::is_uint32_positive(options_json_len)) return wilton::support::alloc_copy(TRACEMSG(
             "Invalid 'options_json_len' parameter specified: [" + sl::support::to_string(options_json_len) + "]"));
     try {
         auto repo_path_str = std::string(repo_path, static_cast<uint16_t>(repo_path_len));
-        auto branch_name_str = std::string(branch_name, static_cast<uint16_t>(branch_name_len));
+        wilton::support::log_debug(logger, std::string() + "Pulling Git repo," +
+                " path: [" + repo_path_str + "] ...");
 
         // find out remote url
         git_repository* repo = nullptr;
@@ -334,49 +386,9 @@ char* wilton_git_pull(
                     " message: [" + pa.first + "]"));
         }
 
-        // checkout
-        
-        git_object* treeish = nullptr;
-        auto rbranch = "origin/" + branch_name_str;
-        auto tree_err = git_revparse_single(std::addressof(treeish), repo, rbranch.c_str());
-        if (0 != tree_err) {
-            auto pa = last_git_error();
-            throw wilton::support::exception(TRACEMSG(
-                    "Remote branch not found," + 
-                    " branch: [" + rbranch + "]," +
-                    " path: [" + repo_path_str + "]," +
-                    " code: [" + sl::support::to_string(pa.second) + "]," +
-                    " message: [" + pa.first + "]"));
-        }
-        auto deferred_treeish = sl::support::defer([treeish]() STATICLIB_NOEXCEPT {
-            git_object_free(treeish);
-        });
- 
-        git_checkout_options copts;
-        git_checkout_init_options(std::addressof(copts), GIT_CHECKOUT_OPTIONS_VERSION);
-        copts.checkout_strategy = GIT_CHECKOUT_SAFE;
-        auto checkout_err = git_checkout_tree(repo, treeish, std::addressof(copts));
-        if (0 != checkout_err) {
-            auto pa = last_git_error();
-            throw wilton::support::exception(TRACEMSG(
-                    "Branch checkout error," + 
-                    " branch: [" + rbranch + "]," +
-                    " path: [" + repo_path_str + "]," +
-                    " code: [" + sl::support::to_string(pa.second) + "]," +
-                    " message: [" + pa.first + "]"));
-        }
+        checkout_remote_branch(repo_path_str, repo, payload->branch_name);
 
-        auto ref = "refs/remotes/origin/" + branch_name_str;
-        auto head_err = git_repository_set_head(repo, ref.c_str());
-        if(0 != head_err) {
-            auto pa = last_git_error();
-            throw wilton::support::exception(TRACEMSG(
-                    "Branch set HEAD error," + 
-                    " branch: [" + ref + "]," +
-                    " path: [" + repo_path_str + "]," +
-                    " code: [" + sl::support::to_string(pa.second) + "]," +
-                    " message: [" + pa.first + "]"));
-        }
+        wilton::support::log_debug(logger, "Git repo pulled successfully");
 
         return nullptr;
     } catch (const std::exception& e) {
