@@ -46,6 +46,12 @@ char* wilton_git_pull(
         const char* options_json,
         int options_json_len);
 
+char* wilton_git_revparse_head(
+        const char* repo_path,
+        int repo_path_len,
+        char** rev_out,
+        int* rev_len_out);
+
 #ifdef __cplusplus
 }
 #endif

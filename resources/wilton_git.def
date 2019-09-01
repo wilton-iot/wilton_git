@@ -17,6 +17,7 @@ EXPORTS
     wilton_git_shutdown
     wilton_git_clone
     wilton_git_pull
+    wilton_git_revparse_head
 
     wilton_module_init
 

@@ -395,3 +395,75 @@ char* wilton_git_pull(
         return wilton::support::alloc_copy(TRACEMSG(e.what() + "\nException raised"));
     }
 }
+
+char* wilton_git_revparse_head(
+        const char* repo_path,
+        int repo_path_len,
+        char** rev_out,
+        int* rev_len_out) /* noexcept */ {
+    if (nullptr == repo_path) return wilton::support::alloc_copy(TRACEMSG("Null 'repo_path' parameter specified"));
+    if (!sl::support::is_uint16_positive(repo_path_len)) return wilton::support::alloc_copy(TRACEMSG(
+            "Invalid 'repo_path_len' parameter specified: [" + sl::support::to_string(repo_path_len) + "]"));
+    if (nullptr == rev_out) return wilton::support::alloc_copy(TRACEMSG("Null 'rev_out' parameter specified"));
+    if (nullptr == rev_len_out) return wilton::support::alloc_copy(TRACEMSG("Null 'rev_len_out' parameter specified"));
+    try {
+        auto repo_path_str = std::string(repo_path, static_cast<uint16_t>(repo_path_len));
+        wilton::support::log_debug(logger, std::string() + "Performing rev-parse HEAD on Git repo," +
+                " path: [" + repo_path_str + "] ...");
+        // open repo
+        git_repository* repo = nullptr;
+        auto open_err = git_repository_open(std::addressof(repo), repo_path_str.c_str());
+        if (0 != open_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Error opening git repo," + 
+                    " path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+        auto deferred_repo = sl::support::defer([repo]() STATICLIB_NOEXCEPT {
+            git_repository_free(repo);
+        });
+
+        // HEAD reference
+        git_reference* ref = nullptr;
+        auto head_err = git_repository_head(std::addressof(ref), repo);
+        if (0 != head_err) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Error obtaining HEAD reference," + 
+                    " repo path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+        auto deferred_ref = sl::support::defer([ref]() STATICLIB_NOEXCEPT {
+            git_reference_free(ref);
+        });
+
+        // oid
+        auto oid = git_reference_target(ref);
+        if (nullptr == oid) {
+            auto pa = last_git_error();
+            throw wilton::support::exception(TRACEMSG(
+                    "Error obtaining HEAD reference oid," + 
+                    " repo path: [" + repo_path_str + "]," +
+                    " code: [" + sl::support::to_string(pa.second) + "]," +
+                    " message: [" + pa.first + "]"));
+        }
+
+        // revision
+        auto buf = wilton::support::alloc_span(40);
+        git_oid_fmt(buf.data(), oid);
+
+        wilton::support::log_debug(logger,
+                "HEAD reference obtained successfully, id: [" + std::string(buf.data(), buf.size()) + "]");
+
+        *rev_out = buf.data();
+        *rev_len_out = buf.size_int();
+ 
+        return nullptr;
+    } catch (const std::exception& e) {
+        return wilton::support::alloc_copy(TRACEMSG(e.what() + "\nException raised"));
+    }
+ 
+}

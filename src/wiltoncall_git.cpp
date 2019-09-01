@@ -125,6 +125,32 @@ support::buffer pull(sl::io::span<const char> data) {
     return support::make_null_buffer();
 }
 
+support::buffer revparse_head(sl::io::span<const char> data) {
+    // json parse
+    auto json = sl::json::load(data);
+    auto rrepo = std::ref(sl::utils::empty_string());
+    for (const sl::json::field& fi : json.as_object()) {
+        auto& name = fi.name();
+        if ("repo" == name) {
+            rrepo = fi.as_string_nonempty_or_throw(name);
+        } else {
+            throw support::exception(TRACEMSG("Unknown data field: [" + name + "]"));
+        }
+    }
+    if (rrepo.get().empty()) throw support::exception(TRACEMSG(
+            "Required parameter 'repo' not specified"));
+    const std::string& repo = rrepo.get();
+    // prevent shutdown during the call
+    auto trigger = shutdown_trigger();
+    // call wilton
+    char* rev_out = nullptr;
+    int rev_len_out = 0;
+    char* err = wilton_git_revparse_head(repo.c_str(), static_cast<int>(repo.length()),
+            std::addressof(rev_out), std::addressof(rev_len_out));
+    if (nullptr != err) support::throw_wilton_error(err, TRACEMSG(err));
+    return support::wrap_wilton_buffer(rev_out, rev_len_out);
+}
+
 } // namespace
 }
 
@@ -136,6 +162,7 @@ extern "C" char* wilton_module_init() {
         wilton::git::shutdown_trigger();
         wilton::support::register_wiltoncall("git_clone", wilton::git::clone);
         wilton::support::register_wiltoncall("git_pull", wilton::git::pull);
+        wilton::support::register_wiltoncall("git_revparse_head", wilton::git::revparse_head);
 
         return nullptr;
     } catch (const std::exception& e) {
