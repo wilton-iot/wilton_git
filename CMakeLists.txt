@@ -22,7 +22,7 @@ set ( ${PROJECT_NAME}_ADDITIONAL_DEPS )
 if ( STATICLIB_TOOLCHAIN MATCHES "(android|windows|macosx)_.+" )
     staticlib_add_subdirectory ( ${STATICLIB_DEPS}/external_libssh2 )
     staticlib_add_subdirectory ( ${STATICLIB_DEPS}/external_libgit2 )
-elseif ( WILTON_BUILD_FLAVOUR MATCHES "(wheezy|raspbian_stretch)" )
+elseif ( WILTON_BUILD_FLAVOUR MATCHES "(wheezy)" )
     staticlib_add_subdirectory ( ${STATICLIB_DEPS}/external_libgit2 )
 endif ( )
 
